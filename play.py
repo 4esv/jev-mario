@@ -85,7 +85,9 @@ RULES = (
     "A jump arc peaks halfway, so start a jump over a wall when the wall is about half the far reach "
     "ahead (4 tiles at full speed, 2 at walking speed); jumping from closer hits the wall and drops. "
     "Start a jump over a gap 1 tile before its edge. Against an enemy ahead, jump when it is 2 to 3 tiles "
-    "away. An enemy 1 or 2 tiles behind Mario will hit him within a second: jump immediately. "
+    "away; a hop is enough to clear or stomp one enemy and lands sooner, so prefer it when nothing further needs a full jump. "
+    "Enemies appear at the right edge of the screen as Mario advances, so a jump that lands past what is visible "
+    "lands blind. An enemy 1 or 2 tiles behind Mario will hit him within a second: jump immediately. "
     "The 'summary' field describes what is ahead; the grid is the same information drawn out. "
 )
 GRID_LEGEND = (
@@ -101,6 +103,7 @@ GRID_LEGEND = (
 # Measured in this emulator: a full jump (A held until landing) at a given horizontal speed.
 # (min speed byte, tiles high, tiles far). Height comes from the hold; distance from speed.
 JUMP_TABLE = [(30, 5, 9), (15, 4, 5), (0, 4, 3)]
+HOP_TABLE = [(30, 5), (15, 2), (0, 1)]  # (min speed byte, tiles far) for a hop; measured at 40, 28, 0
 
 
 def jump_reach(v: int) -> tuple[int, int]:
@@ -122,7 +125,7 @@ def speed_word(v: int) -> str:
 
 
 # ----------------------------------------------------------------------------- EDIT HERE: state description
-def features(g: str, v: int = 0, airborne: bool | None = None) -> dict:
+def features(g: str, v: int = 0, airborne: bool | None = None, visible: int = 15) -> dict:
     """Turn the grid into fields and a summary sentence. Mario is row 6, column 4; right is +column."""
     rows = g.splitlines()
     look = range(1, 9)
@@ -165,7 +168,7 @@ def features(g: str, v: int = 0, airborne: bool | None = None) -> dict:
         behind += 1
     f["clear_behind"] = behind
 
-    parts = []
+    parts, warns = [], []
     w, gp = f["wall_ahead"], f["gap_ahead"]
     parts.append(f"A solid wall {w['height']} tiles tall is {w['tiles']} tile(s) ahead." if w else "No wall ahead.")
     parts.append(f"There are {behind} tiles of clear ground behind Mario for a run-up.")
@@ -184,6 +187,9 @@ def features(g: str, v: int = 0, airborne: bool | None = None) -> dict:
         parts.append(f"An enemy is {f['enemies_behind'][0]} tile(s) behind Mario; walking left into it is death.")
     f["speed"] = speed_word(v)
     high, far = jump_reach(v)
+    hop_far = HOP_TABLE[0][1] if abs(v) >= HOP_TABLE[0][0] else (HOP_TABLE[1][1] if abs(v) >= HOP_TABLE[1][0] else HOP_TABLE[2][1])
+    f["hop_lands_tiles_ahead"] = hop_far
+    f["visible_tiles_ahead"] = visible
     f["jump_reach_now"] = {"tiles_high": high, "tiles_far": far}
     f["jump_reach_at_full_speed"] = {"tiles_high": JUMP_TABLE[0][1], "tiles_far": JUMP_TABLE[0][2]}
     parts.append(("Mario is on the ground, " if f["on_ground"] else "Mario is in the air, ") + f["speed"] + ".")
@@ -194,7 +200,7 @@ def features(g: str, v: int = 0, airborne: bool | None = None) -> dict:
         if high >= w["height"]:  # verified by replay: a 4-tile standing jump lands on a 4-tall ledge
             parts.append(f"Start the jump when the wall is about {max(1, far // 2)} tiles ahead.")
         else:
-            parts.append("A jump from this speed is not high enough for this wall; more speed is needed.")
+            warns.append("A jump from this speed is not high enough for the wall ahead; more speed is needed.")
     # Headroom: blocks above the arc cut a jump short.
     headroom = 13
     for dx in range(0, min(far, 15) + 1):
@@ -209,22 +215,27 @@ def features(g: str, v: int = 0, airborne: bool | None = None) -> dict:
     else:
         eff_far = far
     # Landing zone: enemies walk toward Mario about 2 tiles during a one-second jump.
-    land = [en for en in seen if abs(en["up"]) <= 1 and eff_far - 4 <= en["tiles"] <= eff_far + 1]
+    land = [en for en in seen if abs(en["up"]) <= 1 and eff_far - 4 <= en["tiles"] <= eff_far + 3]
     f["enemies_near_landing_spot"] = [en["tiles"] for en in land]
-    parts.append(f"A jump right now would land about {eff_far} tiles ahead"
-                 + (", where an enemy will be by then." if land else ", on clear ground."))
+    parts.append(f"A full jump right now would land about {eff_far} tiles ahead; a hop about {hop_far}. "
+                 f"The screen shows {visible} tiles ahead; enemies beyond that are unknown until Mario moves closer.")
+    if land:
+        warns.append(f"Do not take a full jump now: it lands about {eff_far} tiles ahead, where an enemy will be by then.")
+    if eff_far >= visible:
+        warns.append("A full jump now lands past what is visible, on unknown ground.")
     on_wall = [en for en in seen if w and en["tiles"] in (w["tiles"], w["tiles"] + 1) and en["up"] >= 1]
     if on_wall:
         clear_over = JUMP_TABLE[0][1] >= w["height"] + 2
-        parts.append("An enemy is on top of the wall ahead: jumping onto it is death. "
+        warns.append("An enemy is on top of the wall ahead: jumping onto it is death. "
                      + ("A full-speed jump started 4 tiles before the wall clears the wall and the enemy together."
                         if clear_over else "Back off, wait for it to move, then jump when the top is clear."))
     if enemies and enemies[0] <= 1:
-        parts.append("An enemy is right in front of Mario: moving toward it is death. Jump in place if standing still; "
+        warns.append("An enemy is right in front of Mario: moving toward it is death. Jump in place if standing still; "
                      "momentum carries into a jump, so at speed a full jump forward is the only way over it.")
     if f["enemies_behind"] and f["enemies_behind"][0] <= 2:
-        parts.append("The enemy behind reaches Mario in about a second: jump over it or away from it, but not into another enemy.")
-    f["summary"] = " ".join(parts)
+        warns.append("The enemy behind reaches Mario in about a second: jump over it or away from it, but not into another enemy.")
+    f["warnings"] = warns
+    f["summary"] = (("WARNINGS: " + " ".join(warns) + " ") if warns else "") + " ".join(parts)
     return f
 
 
@@ -262,7 +273,8 @@ def policy(f: dict) -> str:
             return forward_jump if gp["tiles"] <= 1 else "run right"
         return "run right" if gp["tiles"] >= 6 else "back off for a run-up"
     if ahead and 2 <= ahead[0] <= 3:
-        return "hop right" if landing_bad else forward_jump
+        blind = f["jump_reach_now"]["tiles_far"] >= f["visible_tiles_ahead"]
+        return "hop right" if (landing_bad or blind) else forward_jump
     return "run right"
 
 
@@ -411,7 +423,7 @@ def run(bot: str, level: str = "1-1", dump: bool = False) -> dict:
             frame += (-frame) % HOLD
         if frame % HOLD == 0:
             g, _, _ = grid(ram)
-            feats = features(g, speed(ram), airborne=airborne(ram))
+            feats = features(g, speed(ram), airborne=airborne(ram), visible=(256 - int(ram[0x03AD])) // 16)
             state = {"summary": feats.pop("summary"), **feats, "grid": g, "action_before": action}
             if dump:
                 print(f"frame {frame} x={info['x_pos']}\n{state['summary']}\n{g}\n")

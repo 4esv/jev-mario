@@ -4,7 +4,7 @@
 
 | 1-1 | 2-1 | 3-1 |
 |---|---|---|
-| ![1-1](runs/1-1-jev-20260918-114528.gif) | ![2-1](runs/2-1-jev-20260918-114550.gif) | ![3-1](runs/3-1-jev-20260918-114602.gif) |
+| ![1-1](runs/1-1-jev-20260918-120708.gif) | ![2-1](runs/2-1-jev-20260918-120718.gif) | ![3-1](runs/3-1-jev-20260918-120731.gif) |
 
 ## Results
 
@@ -12,15 +12,15 @@ One life per run. A run ends at death, at the flag (x ≈ 3160), or after 6 game
 
 | level | Jev, 3 runs (x reached) | rules bot (same fields, deterministic) | hold "run and jump" |
 |---|---|---|---|
-| 1-1 | 294, 2011, 2011 | 1129 | 1526 |
-| 2-1 | 445, 445, 474 | 723 | 476 |
-| 3-1 | 375, 606, 606 | 608 | 775 |
-| 4-1 (not used while writing the rules) | 1306, 1306, 1306 | 1827 | — |
-| 5-1 (not used while writing the rules) | 201, 296, 296 | 271 | — |
+| 1-1 | 686, 686, 686 | 1129 | 1526 |
+| 2-1 | 473, 473, 473 | 741 | 476 |
+| 3-1 | 607, 754, 841 | 608 | 775 |
+| 4-1 (not used while writing the rules) | 339, 339, 1305 | 1827 | — |
+| 5-1 (not used while writing the rules) | 305, 439, 439 | 271 | — |
 
-Jev runs used 4–27 API calls each, under $0.002 per run, at a median latency of about 180 ms per decision.
+Jev runs used 5–15 API calls each, under $0.002 per run, at a median latency of about 180 ms per decision.
 
-The rules bot (`--bot rules`) is the RULES text written as an if-chain over the same fields Jev receives. Neither reader dominates: Jev's best run leads on 1-1, the rules bot leads on 2-1 and 4-1, and 5-1 stops both at the first enemy. The two levels not used while writing the rules did not favour Jev.
+The rules bot (`--bot rules`) is the RULES text written as an if-chain over the same fields Jev receives. Neither reader dominates: Jev's best run leads on 3-1 and 5-1, the rules bot leads on 1-1, 2-1 and 4-1. The two levels not used while writing the rules did not favour Jev.
 
 Jev's choices track the state description closely. Every recorded death traced back to something the description got wrong or left out, not to Jev choosing against it: a landing check that misread overhead blocks as ground, an enemy scan limited to ground level (a piranha plant on a pipe was invisible), a lookahead shorter than a full jump, jumps cut short by blocks overhead. Each fix moved the death further along. Play quality is bounded by the hand-written description of the game's physics.
 
@@ -28,7 +28,7 @@ Runs are nearly deterministic: the same state sequence usually produces the same
 
 ## State
 
-Each call sends a summary, the fields it is built from, a 13×20 tile grid, and the previous action, and asks one `choice` question with 9 options. Enemies are named by type from RAM (goomba, koopa, shell, piranha plant, flying koopa). About 950 input tokens per call.
+Each call sends a summary (warnings first, then the description), the fields it is built from, a 13×20 tile grid, and the previous action, and asks one `choice` question with 9 options. Enemies are named by type from RAM (goomba, koopa, shell, piranha plant, flying koopa). About 950 input tokens per call.
 
 The summary is templated from RAM. Example:
 
