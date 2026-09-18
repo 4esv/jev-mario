@@ -1,6 +1,6 @@
 # jev-mario
 
-[Jev](https://typesafe.ai) is a text-only decision model. This harness has it play Super Mario Bros by reading the emulator RAM, describing the situation in text, and asking for a joypad action. Jev chooses every action; the harness only executes it (a jump is held until Mario lands) and describes the result.
+[Jev](https://typesafe.ai) is a text-only decision model. This harness has it play Super Mario Bros by reading the emulator RAM, describing the situation in text, and asking for a joypad action. Jev chooses every action; the harness executes it (a jump is held until Mario lands) and describes the result.
 
 | 1-1 | 2-1 | 3-1 |
 |---|---|---|
@@ -12,15 +12,15 @@ One life per run. A run ends at death, at the flag (x ≈ 3160), or after 6 game
 
 | level | Jev, 3 runs (x reached) | hold "run and jump" (scripted) |
 |---|---|---|
-| 1-1 | 1515, 1515, 1960 | 1786 |
+| 1-1 | 1515, 1515, 1960 | 1526 |
 | 2-1 | 297, 471, 471 | 476 |
 | 3-1 | 608, 717, 805 | 775 |
 
 Jev runs used 6–27 API calls each, under $0.002 per run, at a median latency of about 180 ms per decision.
 
-Jev's choices track the state description closely. Every recorded death traced back to something the description got wrong or left out, not to Jev choosing against it: a landing check that misread overhead blocks as ground, an enemy scan limited to ground level (a piranha plant on a pipe was invisible), a lookahead shorter than a full jump, jumps cut short by blocks overhead. Each fix moved the death further along. The play quality is bounded by the description of the game's physics, which is hand-written.
+Jev's choices track the state description closely. Every recorded death traced back to something the description got wrong or left out, not to Jev choosing against it: a landing check that misread overhead blocks as ground, an enemy scan limited to ground level (a piranha plant on a pipe was invisible), a lookahead shorter than a full jump, jumps cut short by blocks overhead. Each fix moved the death further along. Play quality is bounded by the hand-written description of the game's physics.
 
-Runs are nearly deterministic: the same state sequence produces the same choices, so a repeated score is a repeated death.
+Runs are nearly deterministic: the same state sequence usually produces the same choices, so a repeated score is usually a repeated death.
 
 ## State
 
@@ -38,11 +38,22 @@ The jump numbers were measured in the emulator: height depends on how long A is 
 cp .env.example .env            # TYPESAFE_API_KEY=...
 uv sync
 uv run python play.py --bot jev --level 2-1
-uv run python play.py --bot "run and jump right" --level 2-1   # scripted baseline
-uv run python play.py --bot jev --dump                          # print the state without calling the API
-uv run python play.py --bot "replay:runs/<log>.jsonl:jump right,run right"   # replay a log, then hold actions
+uv run python play.py --bot "run and jump right" --level 2-1   # scripted baseline, no API calls
+uv run python play.py --dump --level 2-1                        # print what Jev would see, no API calls
 ```
 
 Each run writes a GIF and a per-decision log (state, grid, probabilities) to `runs/` and appends a line to `runs/results.jsonl`.
+
+## Continue from here
+
+The loop that produced every improvement so far, none of which needs API calls until the last step:
+
+```bash
+uv run python play.py --inspect runs/<log>.jsonl -n 3           # what Jev saw at the last decisions
+uv run python play.py --bot "replay:runs/<log>.jsonl@18:jump right,run right"
+                                                                 # replay the first 18 choices, then hold the tail
+```
+
+If a different action survives in replay, the fix belongs in one of the three blocks marked `EDIT HERE` in `play.py`: the actions Jev can pick, the rules it is given, or `features()`, which turns the grid into the summary. Then run Jev again.
 
 Emulator: `gym-super-mario-bros` with `nes-py`, pinned to `numpy<2` and `gym==0.26`.

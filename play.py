@@ -1,10 +1,17 @@
 """Jev plays Super Mario Bros from a text description of the emulator RAM.
 
-    uv run python play.py --bot jev [--level 2-1]   # Jev picks the action every HOLD frames
-    uv run python play.py --bot alternate    # scripted baseline, no API calls
-    uv run python play.py --bot jev --dump   # print the grid Jev sees, no API calls
+    uv run python play.py --bot jev --level 1-1                # Jev picks every action
+    uv run python play.py --bot "run and jump right"           # scripted baseline, no API calls
+    uv run python play.py --dump --level 2-1                   # print what Jev would see, no API calls
+    uv run python play.py --inspect runs/<log>.jsonl [-n 3]    # last decisions: state, grid, probabilities
+    uv run python play.py --bot "replay:runs/<log>.jsonl@18:jump right,run right"
+                                                               # replay the first 18 logged choices, then hold the tail
 
-Writes runs/<bot>-<timestamp>.gif and appends one JSON line per run to runs/results.jsonl.
+Each run writes runs/<level>-<bot>-<stamp>.gif, a per-decision log next to it, and one line in runs/results.jsonl.
+
+To improve play, edit the three blocks marked EDIT HERE: the actions Jev can choose, the rules it is given,
+and features(), which turns the tile grid into the summary. Reproduce a death with --inspect, test a fix with
+replay (no API calls), then run Jev again.
 """
 
 import argparse
@@ -13,19 +20,32 @@ import os
 import time
 from pathlib import Path
 
-import gym_super_mario_bros
+import contextlib
+import io
+import warnings
+
 import httpx
 import imageio.v2 as imageio
-from gym_super_mario_bros.actions import SIMPLE_MOVEMENT
-from nes_py.wrappers import JoypadSpace
 
-HOLD = 6  # frames per decision; 60 fps, so 10 decisions per game second
+warnings.filterwarnings("ignore")
+with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+    # gym 0.26 prints a deprecation banner at import; nes-py needs this gym version.
+    import gym_super_mario_bros
+    from gym_super_mario_bros.actions import SIMPLE_MOVEMENT
+    from nes_py.wrappers import JoypadSpace
+
+HOLD = 6  # frames per decision on the ground; 60 fps
 MAX_FRAMES = 6000
 STALL_FRAMES = 360  # give up after 6 game-seconds without gaining distance
+HOP_FRAMES = 8  # A held this long gives a ~2.4 tile hop
+FULL_JUMP_FRAMES = 64  # a full-speed jump lasts about 50 frames
 RUNS = Path(__file__).resolve().parent / "runs"
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
 USD_PER_TOKEN = 0.042 / 1e6
 
+# ----------------------------------------------------------------------------- EDIT HERE: actions
+# Joypad index in SIMPLE_MOVEMENT, or BACK_OFF for the harness-executed retreat.
+BACK_OFF = -2
 ACTIONS = {
     "stand": 0,
     "walk right": 1,
@@ -35,13 +55,8 @@ ACTIONS = {
     "jump in place": 5,
     "walk left": 6,
     "hop right": 2,  # same button as "jump right", released after HOP_FRAMES
-    "back off for a run-up": -2,  # walk left until the obstacle ahead is 6 tiles away
+    "back off for a run-up": BACK_OFF,
 }
-HOP_FRAMES = 8
-FULL_JUMP_FRAMES = 64
-MACRO = "running jump at the obstacle ahead"  # harness-executed; offered only with --macro
-JUMPS = {2, 4, 5}
-RELEASE = {2: 1, 4: 3, 5: 0}  # same action without A
 ACTION_HELP = {
     "stand": "wait in place; use when an enemy on a wall or pipe ahead has to move away first",
     "walk right": "move right slowly",
@@ -55,11 +70,33 @@ ACTION_HELP = {
     "back off for a run-up": "walk left until the wall or gap ahead is 6 tiles away, so that 'run right' can "
     "build full speed before jumping; do not use with an enemy behind Mario",
 }
-MACRO_HELP = ("back up, run at full speed, and jump when the obstacle is 3 tiles ahead; takes about a second; "
-              "use for a wall 3 or more tiles tall or a gap 3 or more tiles wide")
+JUMPS = {2, 4, 5}
+RELEASE = {2: 1, 4: 3, 5: 0}  # same action without A
+
+# ----------------------------------------------------------------------------- EDIT HERE: rules
+RULES = (
+    "You control Mario in Super Mario Bros. Pick the joypad action that moves right as far as possible "
+    "without dying. A jump action is held until Mario lands, so one decision is one full jump. "
+    "Mario must jump over walls, gaps and enemies. A jump clears a wall only if its reach in tiles high "
+    "is at least the wall height, and a gap only if its reach in tiles far exceeds the gap width plus 1. "
+    "Reach grows with speed: 'run right' reaches full speed after about 3 decisions on clear ground. "
+    "When the current reach is not enough and the obstacle is closer than 6 tiles, choose "
+    "'back off for a run-up', then 'run right' until full speed, then 'run and jump right' 2 to 3 tiles out. "
+    "A jump arc peaks halfway, so start a jump over a wall when the wall is about half the far reach "
+    "ahead (4 tiles at full speed, 2 at walking speed); jumping from closer hits the wall and drops. "
+    "Start a jump over a gap 1 tile before its edge. Against an enemy ahead, jump when it is 2 to 3 tiles "
+    "away. An enemy 1 or 2 tiles behind Mario will hit him within a second: jump immediately. "
+    "The 'summary' field describes what is ahead; the grid is the same information drawn out. "
+)
+GRID_LEGEND = (
+    "Text grid, 13 rows x 20 columns, each cell one 16px tile. Row 7 is Mario's row. "
+    "M = Mario (column 5). # = solid ground, brick, block or pipe. E = enemy. . = empty air. "
+    "Mario walks right (toward higher columns). Falling into a column with no # below Mario is death. "
+    "Touching an E from the side is death; landing on it from above kills it."
+)
 
 # Measured in this emulator: a full jump (A held until landing) at a given horizontal speed.
-# (min speed, tiles high, tiles far)
+# (min speed byte, tiles high, tiles far). Height comes from the hold; distance from speed.
 JUMP_TABLE = [(30, 5, 9), (15, 4, 5), (0, 4, 3)]
 
 
@@ -69,65 +106,9 @@ def jump_reach(v: int) -> tuple[int, int]:
             return high, far
     return JUMP_TABLE[-1][1:]
 
-GRID_LEGEND = (
-    "Text grid, 13 rows x 20 columns, each cell one 16px tile. Row 7 is Mario's row. "
-    "M = Mario (column 5). # = solid ground, brick, block or pipe. E = enemy. . = empty air. "
-    "Mario walks right (toward higher columns). Falling into a column with no # below Mario is death. "
-    "Touching an E from the side is death; landing on it from above kills it."
-)
-
-
-def load_env() -> None:
-    p = Path(__file__).resolve().parent / ".env"
-    if p.exists():
-        for line in p.read_text().splitlines():
-            if "=" in line and not line.startswith("#"):
-                k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip())
-
-
-def nes(env):
-    """Walk the wrapper chain to the nes_py env that owns the RAM."""
-    e = env
-    while not hasattr(e, "ram"):
-        e = e.env
-    return e
-
-
-def tile(ram, x: int, y: int) -> int:
-    # NOTE: SMB keeps two 16x13 tile pages at 0x500, 208 bytes each; y offset 32 is the HUD.
-    page = (x // 256) % 2
-    sx, sy = (x % 256) // 16, (y - 32) // 16
-    if sy < 0 or sy > 12:
-        return 0
-    return int(ram[0x500 + page * 208 + sy * 16 + sx])
-
-
-def grid(ram) -> tuple[str, int, int]:
-    mx = int(ram[0x6D]) * 256 + int(ram[0x86])
-    my = int(ram[0x03B8]) + 16
-    enemies = []
-    for i in range(5):
-        if ram[0x0F + i]:
-            # NOTE: +8 puts a ground enemy in Mario's row; verified against the first goomba.
-            enemies.append((int(ram[0x6E + i]) * 256 + int(ram[0x87 + i]), int(ram[0xCF + i]) + 8))
-    rows = []
-    for dy in range(-6, 7):
-        row = []
-        for dx in range(-4, 16):
-            x, y = mx + dx * 16, my + dy * 16
-            ch = "#" if tile(ram, x, y) else "."
-            if any(abs(ex - x) <= 8 and abs(ey - y) <= 8 for ex, ey in enemies):
-                ch = "E"
-            if dx == 0 and dy == 0:
-                ch = "M"
-            row.append(ch)
-        rows.append("".join(row))
-    return "\n".join(rows), mx, my
-
 
 def speed_word(v: int) -> str:
-    # NOTE: SMB horizontal speed byte 0x57, signed. Walking tops out near 24, running near 40.
+    # SMB horizontal speed byte 0x57, signed. Walking tops out near 28, running near 48.
     if v >= 32:
         return "running at full speed"
     if v >= 8:
@@ -137,11 +118,12 @@ def speed_word(v: int) -> str:
     return "standing still"
 
 
+# ----------------------------------------------------------------------------- EDIT HERE: state description
 def features(g: str, v: int = 0, airborne: bool | None = None) -> dict:
-    """Describe the grid in fields: Mario is row 6, column 4; ground row is 7; right is +column."""
+    """Turn the grid into fields and a summary sentence. Mario is row 6, column 4; right is +column."""
     rows = g.splitlines()
     look = range(1, 9)
-    # NOTE: the grid is Mario-relative, so mid-jump his own row is air. Anchor on the ground under him.
+    # The grid is Mario-relative, so mid-jump his own row is air. Anchor on the ground under him.
     ground = next((r for r in range(7, 13) if rows[r][4] == "#"), 7)
     feet = ground - 1
     on_ground = (not airborne) if airborne is not None else ground == 7
@@ -151,8 +133,9 @@ def features(g: str, v: int = 0, airborne: bool | None = None) -> dict:
             height = sum(1 for r in range(feet, -1, -1) if rows[r][4 + dx] == "#")
             f["wall_ahead"] = {"tiles": dx, "height": height}
             break
+
     def bottomless(col: int) -> bool:
-        # A column with no solid tile from the ground row to the bottom of the grid; a step down is not a gap.
+        # No solid tile from the ground row to the bottom of the grid; a step down is not a gap.
         return all(rows[r][col] == "." for r in range(ground, 13))
 
     for dx in look:
@@ -162,7 +145,7 @@ def features(g: str, v: int = 0, airborne: bool | None = None) -> dict:
                 width += 1
             f["gap_ahead"] = {"tiles": dx, "width": width}
             break
-    # Enemies anywhere ahead within the grid, with height above Mario's feet (0 = same level).
+    # Enemies anywhere ahead, with height above Mario's feet (0 = same level).
     seen = []
     for dx in range(1, 16):
         for r in range(13):
@@ -177,8 +160,9 @@ def features(g: str, v: int = 0, airborne: bool | None = None) -> dict:
     while behind < 4 and rows[feet][3 - behind] == "." and rows[ground][3 - behind] == "#":
         behind += 1
     f["clear_behind"] = behind
+
     parts = []
-    w, gp, e = f["wall_ahead"], f["gap_ahead"], f["enemy_ahead"]
+    w, gp = f["wall_ahead"], f["gap_ahead"]
     parts.append(f"A solid wall {w['height']} tiles tall is {w['tiles']} tile(s) ahead." if w else "No wall ahead.")
     parts.append(f"There are {behind} tiles of clear ground behind Mario for a run-up.")
     parts.append(f"A gap {gp['width']} tiles wide is {gp['tiles']} tile(s) ahead." if gp else "Solid ground ahead.")
@@ -204,12 +188,10 @@ def features(g: str, v: int = 0, airborne: bool | None = None) -> dict:
     if w:
         # The arc peaks halfway, so a wall must be about half the far reach away when the jump starts.
         if high >= w["height"]:  # verified by replay: a 4-tile standing jump lands on a 4-tall ledge
-            f["jump_now_clears_wall"] = w["tiles"] <= max(1, far // 2) + 1 and w["tiles"] >= max(1, far // 2) - 1
             parts.append(f"Start the jump when the wall is about {max(1, far // 2)} tiles ahead.")
         else:
-            f["jump_now_clears_wall"] = False
             parts.append("A jump from this speed is not high enough for this wall; more speed is needed.")
-    # Headroom: blocks above the arc cut a jump short. Clearance in tiles above the feet over the arc.
+    # Headroom: blocks above the arc cut a jump short.
     headroom = 13
     for dx in range(0, min(far, 15) + 1):
         for r in range(feet - 1, -1, -1):
@@ -242,29 +224,72 @@ def features(g: str, v: int = 0, airborne: bool | None = None) -> dict:
     return f
 
 
-def ask_jev(client: httpx.Client, state: dict, macro: bool) -> tuple[str, dict, int, float]:
-    criteria = dict(ACTION_HELP)
-    rules = (
-        "You control Mario in Super Mario Bros. Pick the joypad action that moves right as far as possible "
-        "without dying. A jump action is held until Mario lands, so one decision is one full jump. "
-        "Mario must jump over walls, gaps and enemies. A jump clears a wall only if its reach in tiles high "
-        "is at least the wall height, and a gap only if its reach in tiles far exceeds the gap width plus 1. "
-        "Reach grows with speed: 'run right' reaches full speed after about 3 decisions on clear ground. "
-        "When the current reach is not enough and the obstacle is closer than 6 tiles, choose "
-        "'back off for a run-up', then 'run right' until full speed, then 'run and jump right' 2 to 3 tiles out. "
-        "A jump arc peaks halfway, so start a jump over a wall when the wall is about half the far reach "
-        "ahead (4 tiles at full speed, 2 at walking speed); jumping from closer hits the wall and drops. "
-        "Start a jump over a gap 1 tile before its edge. Against an enemy ahead, jump when it is 2 to 3 tiles "
-        "away. An enemy 1 or 2 tiles behind Mario will hit him within a second: jump immediately. "
-        "The 'summary' field describes what is ahead; the grid is the same information drawn out. "
-    )
-    if macro:
-        criteria[MACRO] = MACRO_HELP
-        rules += f"'{MACRO}' handles the run-up for you. "
+# ----------------------------------------------------------------------------- emulator and RAM
+def load_env() -> None:
+    p = Path(__file__).resolve().parent / ".env"
+    if p.exists():
+        for line in p.read_text().splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
+
+
+def nes(env):
+    """Walk the wrapper chain to the nes_py env that owns the RAM."""
+    e = env
+    while not hasattr(e, "ram"):
+        e = e.env
+    return e
+
+
+def tile(ram, x: int, y: int) -> int:
+    # SMB keeps two 16x13 tile pages at 0x500, 208 bytes each; y offset 32 is the HUD.
+    page = (x // 256) % 2
+    sx, sy = (x % 256) // 16, (y - 32) // 16
+    if sy < 0 or sy > 12:
+        return 0
+    return int(ram[0x500 + page * 208 + sy * 16 + sx])
+
+
+def grid(ram) -> tuple[str, int, int]:
+    """13 rows x 20 columns around Mario: 6 rows above, 4 columns behind, 15 ahead."""
+    mx = int(ram[0x6D]) * 256 + int(ram[0x86])
+    my = int(ram[0x03B8]) + 16
+    enemies = []
+    for i in range(5):
+        if ram[0x0F + i]:
+            # +8 puts a ground enemy in Mario's row; verified against the first goomba.
+            enemies.append((int(ram[0x6E + i]) * 256 + int(ram[0x87 + i]), int(ram[0xCF + i]) + 8))
+    rows = []
+    for dy in range(-6, 7):
+        row = []
+        for dx in range(-4, 16):
+            x, y = mx + dx * 16, my + dy * 16
+            ch = "#" if tile(ram, x, y) else "."
+            if any(abs(ex - x) <= 8 and abs(ey - y) <= 8 for ex, ey in enemies):
+                ch = "E"
+            if dx == 0 and dy == 0:
+                ch = "M"
+            row.append(ch)
+        rows.append("".join(row))
+    return "\n".join(rows), mx, my
+
+
+def speed(ram) -> int:
+    v = int(ram[0x57])
+    return v - 256 if v > 127 else v
+
+
+def airborne(ram) -> bool:
+    return bool(ram[0x1D])  # 0 on the ground, 1 for the whole jump; verified against the y trace
+
+
+# ----------------------------------------------------------------------------- Jev
+def ask_jev(client: httpx.Client, state: dict) -> tuple[str, dict, int, float]:
     body = {
         "state": state,
         "model": "jev-latest",
-        "questions": {"action": {"type": "choice", "instructions": rules + GRID_LEGEND, "criteria": criteria}},
+        "questions": {"action": {"type": "choice", "instructions": RULES + GRID_LEGEND, "criteria": ACTION_HELP}},
     }
     t0 = time.perf_counter()
     r = client.post(JEV_URL, headers={"Authorization": f"Bearer {os.environ['TYPESAFE_API_KEY']}"}, json=body)
@@ -275,168 +300,156 @@ def ask_jev(client: httpx.Client, state: dict, macro: bool) -> tuple[str, dict, 
     return a["choice"], a["probabilities"], d["usage"]["input_tokens"], lat
 
 
-def run(bot: str, dump: bool, level: str = "1-1", macro: bool = False) -> dict:
+# ----------------------------------------------------------------------------- run loop
+class Replay:
+    """replay:<log.jsonl>[@n]:<action,...> — replay the first n logged choices, then cycle through the tail."""
+
+    def __init__(self, spec: str):
+        _, path, tail = spec.split(":", 2)
+        n = None
+        if "@" in path:
+            path, n = path.rsplit("@", 1)
+        self.script = [json.loads(l)["choice"] for l in Path(path).read_text().splitlines()][: int(n) if n else None]
+        self.tail = tail.split(",")
+        self.i = 0
+
+    def next(self) -> str:
+        if self.script:
+            return self.script.pop(0)
+        name = self.tail[min(self.i, len(self.tail) - 1)]
+        self.i += 1
+        return name
+
+
+def run(bot: str, level: str = "1-1", dump: bool = False) -> dict:
+    warnings.simplefilter("ignore")  # gym's env checker re-enables a numpy deprecation warning
     env = JoypadSpace(gym_super_mario_bros.make(f"SuperMarioBros-{level}-v0", apply_api_compatibility=True), SIMPLE_MOVEMENT)
     ram = nes(env).ram
     obs, _ = env.reset()
-    # NOTE: nes_py reuses one screen buffer, so every stored frame must be a copy.
-    frames, decisions, tokens, lats, best = [obs.copy()], 0, 0, [], 0
-    action, info, frame, hold_cap = 0, {"x_pos": 0, "flag_get": False}, 0, FULL_JUMP_FRAMES
-    last_best, last_gain, prev = 0, 0, 0
+    # nes_py reuses one screen buffer, so every stored frame must be a copy.
+    frames, tokens, lats, log = [obs.copy()], 0, [], []
+    action, prev, hold_cap = 0, 0, FULL_JUMP_FRAMES
+    frame, best, last_best, last_gain = 0, 0, 0, 0
+    info = {"x_pos": 0, "flag_get": False}
     term = trunc = False
-    replay_script, replay_tail, replay_i = [], [], 0
-    if bot.startswith("replay:"):
-        _, path, tail = bot.split(":", 2)
-        replay_script = [json.loads(l)["choice"] for l in Path(path).read_text().splitlines()]
-        replay_tail = tail.split(",")
+    deciding = bot == "jev" or bot.startswith("replay:") or dump
+    replay = Replay(bot) if bot.startswith("replay:") else None
     client = httpx.Client(timeout=30)
-    log = []
+
+    def step(a: int) -> bool:
+        """Advance one frame; record every other frame; return True when the episode is over."""
+        nonlocal obs, term, trunc, info, frame, best
+        obs, _, term, trunc, info = env.step(a)
+        frame += 1
+        best = max(best, int(info["x_pos"]))
+        if frame % 2 == 0:
+            frames.append(obs.copy())
+        return bool(term or trunc)
+
     while frame < MAX_FRAMES:
-        if frame % HOLD == 0 and (bot == "jev" or bot.startswith("replay:")) and not dump:
+        if frame % HOLD == 0 and deciding:
             # Decide only on the ground: keep the current direction (without A) while airborne.
             fall = 0
-            while ram[0x1D] and fall < 120:
-                obs, _, term, trunc, info = env.step(RELEASE.get(action, action))
-                frame += 1
+            while airborne(ram) and fall < 120 and not step(RELEASE.get(action, action)):
                 fall += 1
-                if fall % 2 == 0:
-                    frames.append(obs.copy())
-                if term or trunc:
-                    break
             if term or trunc:
                 break
             frame += (-frame) % HOLD
         if frame % HOLD == 0:
-            g, mx, my = grid(ram)
-            v = int(ram[0x57])
-            feats = features(g, v - 256 if v > 127 else v, airborne=bool(ram[0x1D]))
+            g, _, _ = grid(ram)
+            feats = features(g, speed(ram), airborne=airborne(ram))
             state = {"summary": feats.pop("summary"), **feats, "grid": g, "action_before": action}
-            if bot == "jev":
-                if dump:
-                    print(f"frame {frame} x={info['x_pos']}\n{g}\n")
-                    action = 4 if (frame // 12) % 2 == 0 else 3
-                else:
-                    name, probs, tok, lat = ask_jev(client, state, macro)
-                    action, tokens = (-1 if name == MACRO else ACTIONS[name]), tokens + tok
-                    hold_cap = HOP_FRAMES if name == "hop right" else FULL_JUMP_FRAMES
-                    lats.append(lat)
-                    log.append({"frame": frame, "x": int(info["x_pos"]), "choice": name, "p": round(probs[name], 2),
-                                "probs": {k: round(v, 2) for k, v in probs.items()}, "summary": state["summary"],
-                                "grid": g})
-            elif bot == "alternate":
-                action = 4 if (frame // 12) % 2 == 0 else 3
-            elif bot.startswith("replay:"):
-                # replay:<log.jsonl>:<action>[,<action>...] — replay logged choices, then the given tail.
-                name = replay_script.pop(0) if replay_script else replay_tail[min(replay_i, len(replay_tail) - 1)]
-                if not replay_script:
-                    replay_i += 1
-                action = -2 if name == "back off for a run-up" else ACTIONS[name]
-                hold_cap = HOP_FRAMES if name == "hop right" else FULL_JUMP_FRAMES
+            if dump:
+                print(f"frame {frame} x={info['x_pos']}\n{state['summary']}\n{g}\n")
+                name = "run and jump right" if (frame // 12) % 2 == 0 else "run right"
+            elif bot == "jev":
+                name, probs, tok, lat = ask_jev(client, state)
+                tokens += tok
+                lats.append(lat)
+                log.append({"frame": frame, "x": int(info["x_pos"]), "choice": name, "p": round(probs[name], 2),
+                            "probs": {k: round(p, 2) for k, p in probs.items()}, "summary": state["summary"], "grid": g})
+            elif replay:
+                name = replay.next()
                 log.append({"frame": frame, "x": int(info["x_pos"]), "choice": name, "summary": state["summary"], "grid": g})
+            elif bot == "alternate":
+                name = "run and jump right" if (frame // 12) % 2 == 0 else "run right"
             else:
-                action = ACTIONS[bot]
-            decisions += 1
-            # NOTE: the NES only jumps on an A press, not a hold. Release A for one frame between decisions.
-            if action == -1:
-                # Macro, tuned by sweep at the 4-tall pipe: back up until the obstacle is 6 tiles
-                # ahead, run until it is 3 ahead, jump and hold A for 30 frames.
-                def near() -> int:
-                    fe = features(grid(ram)[0], 48)
-                    return (fe["wall_ahead"] or fe["gap_ahead"] or {}).get("tiles", 99)
+                name = bot
+            action = ACTIONS[name]
+            hold_cap = HOP_FRAMES if name == "hop right" else FULL_JUMP_FRAMES
 
-                def enemy_close() -> bool:
-                    e = features(grid(ram)[0], 48)["enemy_ahead"]
-                    return bool(e) and e["tiles"] <= 2
-
-                # An enemy inside 2 tiles during the run-up aborts the plan with an immediate jump.
-                plan = [(6, lambda: near() >= 6, 120), (3, lambda: near() <= 3 or enemy_close(), 120), (4, lambda: False, 30)]
-                for act, done_when, limit in plan:
-                    for i in range(limit):
-                        obs, _, term, trunc, info = env.step(act)
-                        frame += 1
-                        if i % 2 == 0:
-                            frames.append(obs.copy())
-                        if done_when() or term or trunc:
-                            break
-                    if term or trunc:
+            if action == BACK_OFF:
+                # Atomic: walk left until the obstacle ahead is 6 tiles away, at most 60 frames.
+                for _ in range(60):
+                    if step(6):
                         break
-                frame += (-frame) % HOLD  # realign so the next decision comes on the next boundary
-                action, prev = 3, 0
-                if term or trunc:
-                    break
-            if action == -2:
-                # Atomic back-off: walk left until the obstacle ahead is 6 tiles away, at most 60 frames.
-                for i in range(60):
-                    obs, _, term, trunc, info = env.step(6)
-                    frame += 1
-                    if i % 2 == 0:
-                        frames.append(obs.copy())
                     fe = features(grid(ram)[0], 0)
-                    near = (fe["wall_ahead"] or fe["gap_ahead"] or {}).get("tiles", 99)
-                    if term or trunc or near >= 6:
+                    if (fe["wall_ahead"] or fe["gap_ahead"] or {}).get("tiles", 99) >= 6:
                         break
                 if term or trunc:
                     break
                 frame += (-frame) % HOLD
                 action = 0
-            if action in JUMPS and prev in JUMPS:
-                obs, _, term, trunc, info = env.step(RELEASE[action])
-                frame += 1
-                if term or trunc:
-                    break
+            # The NES only jumps on an A press, not a hold: release A for one frame between two jumps.
+            if action in JUMPS and prev in JUMPS and step(RELEASE[action]):
+                break
             prev = action
-            if action in JUMPS and bot != "alternate" and not dump:
+            if action in JUMPS and bot != "alternate":
                 # One decision is one jump: hold A until Mario lands, or hold_cap frames for a hop.
-                # A full-speed jump lasts about 50 frames, so the cap must exceed that.
                 for i in range(FULL_JUMP_FRAMES):
-                    obs, _, term, trunc, info = env.step(action)
-                    frame += 1
-                    if i % 2 == 0:
-                        frames.append(obs.copy())
-                    if term or trunc or i >= hold_cap or (i > 4 and ram[0x1D] == 0):
+                    if step(action) or i >= hold_cap or (i > 4 and not airborne(ram)):
                         break
-                best = max(best, int(info["x_pos"]))
                 if term or trunc:
                     break
                 frame += (-frame) % HOLD
                 action = RELEASE[action]
-        obs, _, term, trunc, info = env.step(action)
-        frame += 1
-        best = max(best, int(info["x_pos"]))
-        if frame % 2 == 0:
-            frames.append(obs.copy())
+        if step(action):
+            break
         if best > last_best:
             last_best, last_gain = best, frame
-        if term or trunc or info["flag_get"] or frame - last_gain > STALL_FRAMES:
+        if info["flag_get"] or frame - last_gain > STALL_FRAMES:
             break
     env.close()
+
     RUNS.mkdir(exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    tag = f"{level}-{'replay' if bot.startswith('replay:') else bot.replace(' ', '-')}"
-    gif = RUNS / f"{tag}-{stamp}.gif"
-    if not dump:
-        imageio.mimsave(gif, frames, duration=1 / 30, loop=0)
+    tag = f"{level}-{'replay' if replay else bot.replace(' ', '-')}"
     result = {
-        "level": level, "bot": bot, "macro": macro, "stamp": stamp, "best_x": best, "flag": bool(info["flag_get"]), "frames": frame,
-        "decisions": decisions, "api_calls": len(lats), "input_tokens": tokens,
+        "level": level, "bot": bot, "stamp": stamp, "best_x": best, "flag": bool(info["flag_get"]),
+        "frames": frame, "api_calls": len(lats), "input_tokens": tokens,
         "cost_usd": round(tokens * USD_PER_TOKEN, 5),
         "latency_p50": round(sorted(lats)[len(lats) // 2], 3) if lats else None,
-        "gif": gif.name if not dump else None,
+        "gif": None if dump else f"{tag}-{stamp}.gif",
     }
     if not dump:
-        with (RUNS / "results.jsonl").open("a") as f:
-            f.write(json.dumps(result) + "\n")
+        imageio.mimsave(RUNS / result["gif"], frames, duration=1 / 30, loop=0)
+        with (RUNS / "results.jsonl").open("a") as fh:
+            fh.write(json.dumps(result) + "\n")
         if log:
             (RUNS / f"{tag}-{stamp}.log.jsonl").write_text("\n".join(json.dumps(l) for l in log) + "\n")
     return result
 
 
+def inspect(path: str, n: int) -> None:
+    lines = [json.loads(l) for l in Path(path).read_text().splitlines()]
+    print(f"{len(lines)} decisions:", [(l["x"], l["choice"]) for l in lines])
+    for l in lines[-n:]:
+        top = sorted(l.get("probs", {}).items(), key=lambda kv: -kv[1])[:4]
+        print(f"\nframe {l['frame']} x={l['x']} -> {l['choice']} {l.get('p', '')}  {top}")
+        print(l["summary"])
+        print(l["grid"])
+
+
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--bot", default="jev", help="jev | alternate | <action name> | replay:<log.jsonl>:<action,...>")
-    ap.add_argument("--dump", action="store_true", help="print grids instead of calling Jev")
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--bot", default="jev", help="jev | alternate | <action name> | replay:<log.jsonl>[@n]:<action,...>")
     ap.add_argument("--level", default="1-1", help="world-stage, e.g. 2-1")
-    ap.add_argument("--macro", action="store_true", help="also offer the harness-executed running-jump macro")
+    ap.add_argument("--dump", action="store_true", help="print the state Jev would see, no API calls")
+    ap.add_argument("--inspect", metavar="LOG", help="print the last decisions of a run log and exit")
+    ap.add_argument("-n", type=int, default=3, help="decisions to show with --inspect")
     a = ap.parse_args()
-    load_env()
-    print(json.dumps(run(a.bot, a.dump, a.level, a.macro)))
+    if a.inspect:
+        inspect(a.inspect, a.n)
+    else:
+        load_env()
+        print(json.dumps(run(a.bot, a.level, a.dump)))
