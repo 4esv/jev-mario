@@ -1,48 +1,48 @@
 # jev-mario
 
-[Jev](https://typesafe.ai) is a text-only decision model. It cannot see pixels. This script lets it play Super Mario Bros 1-1 anyway, by reading the emulator's RAM, describing the situation in words, and asking Jev which button to press. Every 6 frames it gets a decision back in about 180 ms.
+[Jev](https://typesafe.ai) is a text-only decision model. This harness has it play Super Mario Bros 1-1 by reading the emulator RAM, describing the situation in text, and asking for a joypad action every 6 frames.
 
-![best run](runs/jev-20260918-100936.gif)
+![run](runs/jev-20260918-101109.gif)
 
 ## Results
 
-All runs are on world 1-1, one life, and end at death, at the flag, or after 6 game-seconds without progress. `x` is how far right Mario got. The flag is at about x=3160.
+World 1-1, one life. A run ends at death, at the flag (x ≈ 3160), or after 6 game-seconds without progress.
 
 | player | runs | x reached | calls per run | cost per run |
 |---|---|---|---|---|
 | hold "run and jump" (scripted) | 1 | 724 | 0 | $0 |
 | alternate jump / run (scripted) | 1 | 677 | 0 | $0 |
-| Jev, final harness | 6 | 687, 687, 687, 759, 769, 839 (median 723) | 22 to 42 | under $0.002 |
-| Jev, previous harness (no enemy guard in the macro) | 3 | 2025, 769, 687 | 22 to 89 | under $0.004 |
+| Jev | 6 | 687, 687, 687, 759, 769, 839 | 22–42 | < $0.002 |
 
-So Jev plays about as well as a bot that holds two buttons, with one run that went three times further. Nine runs cost five cents in total.
+Median decision latency: 180 ms.
 
-What Jev does well is pick the right action for what the state describes. It ran, jumped at goombas, and chose "running jump at the obstacle ahead" at the pipes. What it cannot do is plan. Each call is a reflex with no memory. When the run-up for a tall pipe was described as a three-step rule, it walked back correctly and then picked "walk right" instead of "run right" at 0.5 probability, and oscillated in front of the pipe for the rest of the run. The fix was to give it a macro action that the harness executes, and let Jev decide when to use it.
+Jev selects the correct action for the described state, including a multi-step "running jump" macro at pipes. It does not carry a plan across calls; multi-step behaviour has to be packaged as a single action and executed by the harness.
 
-Four of the nine recent runs died identically at x=687. That is a bug in the macro, which walks Mario backwards into a goomba, not a Jev decision.
+Known issue: the macro's back-up phase can walk Mario into an enemy. Three of the six runs ended this way at x=687.
 
-## How the state is fed
+## State
 
-Jev's docs say to send structured program state, not raw data. Three things were tried.
+Each call sends:
 
-An ASCII grid of tiles around Mario. Jev ran straight into the first pipe and never jumped. It does not read a grid as a picture.
+- a one-sentence summary, e.g. `A solid wall 4 tiles tall is 1 tile ahead. There are 4 tiles of clear ground behind Mario for a run-up. No enemy ahead. Mario is on the ground, standing still.`
+- the same information as fields (`wall_ahead`, `gap_ahead`, `enemy_ahead`, `clear_behind`, `on_ground`, `speed`)
+- a 13×16 tile grid around Mario
+- the previous action
 
-Derived fields with a one-sentence summary, such as `A solid wall 4 tiles tall is 1 tile ahead. There are 4 tiles of clear ground behind Mario for a run-up. No enemy ahead. Mario is on the ground, standing still.` This worked immediately. The grid is still sent as a secondary field.
+and asks one `choice` question with 8 options. About 850 input tokens per call.
 
-A hex dump of RAM was not tried, because Jev is trained on text and the bytes carry nothing it can score against.
+The grid alone was not sufficient: with only the grid, Jev did not jump at the first pipe. The derived fields resolved this.
 
-Each call sends the summary, the fields, the grid, and the previous action, and asks one `choice` question with 8 options. That is about 850 input tokens, or 0.004 cents.
-
-## Run it
+## Run
 
 ```bash
 cp .env.example .env            # TYPESAFE_API_KEY=...
 uv sync
 uv run python play.py --bot jev
 uv run python play.py --bot "run and jump right"   # scripted baseline
-uv run python play.py --bot jev --dump              # print what Jev would see, no API calls
+uv run python play.py --bot jev --dump              # print the state without calling the API
 ```
 
-Each run writes a GIF and a log of every decision to `runs/`, and appends a line to `runs/results.jsonl`.
+Each run writes a GIF and a per-decision log to `runs/` and appends a line to `runs/results.jsonl`.
 
-The emulator is `gym-super-mario-bros`, which ships the ROM inside the package. It needs `numpy<2` and `gym==0.26`, both pinned.
+Emulator: `gym-super-mario-bros` with `nes-py`, pinned to `numpy<2` and `gym==0.26`.
