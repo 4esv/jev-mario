@@ -25,7 +25,7 @@ from play import ACTIONS, HOP_FRAMES, JUMPS, RELEASE, RUNS, USD_PER_TOKEN, airbo
 HORIZON = 60  # frames each move is played, then held until landing
 SETTLE_FRAMES = 8  # extra frames after landing so a death on contact is flagged inside the outcome
 OPTIONS = ["run right", "run and jump right", "run then jump", "jump right", "hop right", "jump in place",
-           "walk right", "stand", "walk left", "bounce on the spring behind"]
+           "walk right", "stand", "walk left", "bounce on the spring behind", "hop back onto the ledge behind"]
 FOLLOW_UPS = ["run right", "jump right", "run and jump right", "run then jump", "walk left"]  # 25 two-move paths
 FOLLOW = {"stand": 0, "walk left": 6}  # what to hold after the action itself; default is run right
 COMPOSITE = {
@@ -33,8 +33,12 @@ COMPOSITE = {
 }
 # Raw joypad sequences (SIMPLE_MOVEMENT index, frames) for frame-exact moves. Found by probe at the 2-1
 # tower: step back onto the springboard, jump, land on it, press A as it releases. One frame off and it fails.
-RAW = {"bounce on the spring behind": [(6, 2), (5, 40), (0, 6), (2, 90)]}
-ESCAPE_MOVES = ["walk left", "jump in place", "jump right", "run then jump"]
+RAW = {
+    "bounce on the spring behind": [(6, 2), (5, 40), (0, 6), (2, 90)],
+    # The action set has no left+A: tap A, then steer left in the air. Lands on a ledge up to 2 tiles high behind.
+    "hop back onto the ledge behind": [(5, 8), (6, 30), (0, 10)],
+}
+ESCAPE_MOVES = ["walk left", "jump in place", "jump right", "run then jump", "hop back onto the ledge behind"]
 
 
 class Sim:
@@ -290,10 +294,31 @@ def run(bot: str, level: str) -> dict:
     return result
 
 
+def session(bot: str, levels: list[str], attempts: int) -> list[dict]:
+    """Play levels in order in one process. A level is retried up to `attempts` times; every attempt is logged."""
+    results = []
+    for level in levels:
+        for i in range(1, attempts + 1):
+            r = run(bot, level)
+            r["attempt"] = i
+            results.append(r)
+            print(json.dumps(r), flush=True)
+            if r["flag"]:
+                break
+        else:
+            break  # a level that never cleared ends the session
+    return results
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bot", default="jev", choices=["jev", "search"])
     ap.add_argument("--level", default="1-1")
+    ap.add_argument("--levels", help="comma-separated levels to play in order in one session, e.g. 1-1,2-1,3-1")
+    ap.add_argument("--attempts", type=int, default=3, help="attempts per level in a session")
     a = ap.parse_args()
     play.load_env()
-    print(json.dumps(run(a.bot, a.level)))
+    if a.levels:
+        session(a.bot, a.levels.split(","), a.attempts)
+    else:
+        print(json.dumps(run(a.bot, a.level)))
