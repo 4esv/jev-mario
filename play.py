@@ -1,6 +1,6 @@
-"""Jev plays Super Mario Bros 1-1 from a text grid of the emulator RAM.
+"""Jev plays Super Mario Bros from a text description of the emulator RAM.
 
-    uv run python play.py --bot jev          # Jev picks the action every HOLD frames
+    uv run python play.py --bot jev [--level 2-1]   # Jev picks the action every HOLD frames
     uv run python play.py --bot alternate    # scripted baseline, no API calls
     uv run python play.py --bot jev --dump   # print the grid Jev sees, no API calls
 
@@ -186,8 +186,8 @@ def ask_jev(client: httpx.Client, state: dict) -> tuple[str, dict, int, float]:
     return a["choice"], a["probabilities"], d["usage"]["input_tokens"], lat
 
 
-def run(bot: str, dump: bool) -> dict:
-    env = JoypadSpace(gym_super_mario_bros.make("SuperMarioBros-1-1-v0", apply_api_compatibility=True), SIMPLE_MOVEMENT)
+def run(bot: str, dump: bool, level: str = "1-1") -> dict:
+    env = JoypadSpace(gym_super_mario_bros.make(f"SuperMarioBros-{level}-v0", apply_api_compatibility=True), SIMPLE_MOVEMENT)
     ram = nes(env).ram
     obs, _ = env.reset()
     # NOTE: nes_py reuses one screen buffer, so every stored frame must be a copy.
@@ -260,11 +260,12 @@ def run(bot: str, dump: bool) -> dict:
     env.close()
     RUNS.mkdir(exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    gif = RUNS / f"{bot}-{stamp}.gif"
+    tag = f"{level}-{bot.replace(' ', '-')}"
+    gif = RUNS / f"{tag}-{stamp}.gif"
     if not dump:
         imageio.mimsave(gif, frames, duration=1 / 30, loop=0)
     result = {
-        "bot": bot, "stamp": stamp, "best_x": best, "flag": bool(info["flag_get"]), "frames": frame,
+        "level": level, "bot": bot, "stamp": stamp, "best_x": best, "flag": bool(info["flag_get"]), "frames": frame,
         "decisions": decisions, "api_calls": len(lats), "input_tokens": tokens,
         "cost_usd": round(tokens * USD_PER_TOKEN, 5),
         "latency_p50": round(sorted(lats)[len(lats) // 2], 3) if lats else None,
@@ -274,7 +275,7 @@ def run(bot: str, dump: bool) -> dict:
         with (RUNS / "results.jsonl").open("a") as f:
             f.write(json.dumps(result) + "\n")
         if log:
-            (RUNS / f"{bot}-{stamp}.log.jsonl").write_text("\n".join(json.dumps(l) for l in log) + "\n")
+            (RUNS / f"{tag}-{stamp}.log.jsonl").write_text("\n".join(json.dumps(l) for l in log) + "\n")
     return result
 
 
@@ -282,6 +283,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--bot", default="jev", choices=["jev", "alternate", *ACTIONS])
     ap.add_argument("--dump", action="store_true", help="print grids instead of calling Jev")
+    ap.add_argument("--level", default="1-1", help="world-stage, e.g. 2-1")
     a = ap.parse_args()
     load_env()
-    print(json.dumps(run(a.bot, a.dump)))
+    print(json.dumps(run(a.bot, a.dump, a.level)))

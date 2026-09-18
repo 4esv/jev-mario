@@ -1,24 +1,26 @@
 # jev-mario
 
-[Jev](https://typesafe.ai) is a text-only decision model. This harness has it play Super Mario Bros 1-1 by reading the emulator RAM, describing the situation in text, and asking for a joypad action every 6 frames.
+[Jev](https://typesafe.ai) is a text-only decision model. This harness has it play Super Mario Bros by reading the emulator RAM, describing the situation in text, and asking for a joypad action every 6 frames.
 
-![run](runs/jev-20260918-101109.gif)
+| 1-1 | 2-1 | 3-1 |
+|---|---|---|
+| ![1-1](runs/1-1-jev-20260918-101109.gif) | ![2-1](runs/2-1-jev-20260918-102628.gif) | ![3-1](runs/3-1-jev-20260918-102655.gif) |
 
 ## Results
 
-World 1-1, one life. A run ends at death, at the flag (x ≈ 3160), or after 6 game-seconds without progress.
+One life per run. A run ends at death, at the flag, or after 6 game-seconds without progress. `x` is horizontal distance reached; the flag is at about x=3160 on each level. Jev was not adjusted between levels.
 
-| player | runs | x reached | calls per run | cost per run |
-|---|---|---|---|---|
-| hold "run and jump" (scripted) | 1 | 724 | 0 | $0 |
-| alternate jump / run (scripted) | 1 | 677 | 0 | $0 |
-| Jev | 6 | 687, 687, 687, 759, 769, 839 | 22–42 | < $0.002 |
+| level | Jev (3+ runs) | hold "run and jump" (scripted) | alternate jump / run (scripted) |
+|---|---|---|---|
+| 1-1 | 687, 687, 687, 759, 769, 839 | 724 | 677 |
+| 2-1 | 417, 417, 507 | 532 | 530 |
+| 3-1 | 574, 574, 591 | 420 | 419 |
 
-Median decision latency: 180 ms.
+Jev runs used 22–42 API calls each, under $0.002 per run, with a median decision latency of 180 ms.
 
-Jev selects the correct action for the described state, including a multi-step "running jump" macro at pipes. It does not carry a plan across calls; multi-step behaviour has to be packaged as a single action and executed by the harness.
+Jev selects the correct action for the described state, including a multi-step "running jump" macro at pipes. It does not carry a plan across calls; multi-step behaviour has to be packaged as a single action and executed by the harness. Repeated identical scores are repeated identical deaths: given the same state sequence, its choices are nearly deterministic.
 
-Known issue: the macro's back-up phase can walk Mario into an enemy. Three of the six runs ended this way at x=687.
+Known issue: the macro's run-up is only guarded against the nearest enemy. Most deaths on all three levels are the macro running into a second enemy.
 
 ## State
 
@@ -38,9 +40,9 @@ The grid alone was not sufficient: with only the grid, Jev did not jump at the f
 ```bash
 cp .env.example .env            # TYPESAFE_API_KEY=...
 uv sync
-uv run python play.py --bot jev
-uv run python play.py --bot "run and jump right"   # scripted baseline
-uv run python play.py --bot jev --dump              # print the state without calling the API
+uv run python play.py --bot jev --level 2-1
+uv run python play.py --bot "run and jump right" --level 2-1   # scripted baseline
+uv run python play.py --bot jev --dump                          # print the state without calling the API
 ```
 
 Each run writes a GIF and a per-decision log to `runs/` and appends a line to `runs/results.jsonl`.
