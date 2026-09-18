@@ -4,7 +4,7 @@
 
 | 1-1 | 2-1 | 3-1 |
 |---|---|---|
-| ![1-1](runs/1-1-branch-jev-20260918-145250.gif) | ![2-1](runs/2-1-branch-jev-20260918-133600.gif) | ![3-1](runs/3-1-branch-jev-20260918-144804.gif) |
+| ![1-1](runs/1-1-branch-jev-20260918-170421.gif) | ![2-1](runs/2-1-branch-jev-20260918-155948.gif) | ![3-1](runs/3-1-branch-jev-20260918-144804.gif) |
 
 ## Results
 
@@ -15,8 +15,10 @@
 | level | Jev | search |
 |---|---|---|
 | 1-1 | flag | 2370 |
-| 2-1 | 2066 (flag on the previous build) | 2066 |
-| 3-1 | flag | 2786 |
+| 2-1 | flag ¹ | 2066 |
+| 3-1 | flag ¹ | 2786 |
+
+¹ On earlier builds of `branch.py` (runs `2-1-branch-jev-20260918-155948`, `3-1-branch-jev-20260918-144804`). The current build reaches 2066 on 2-1 and 2770 on 3-1; each stall is a spot where no move in the option set survives three seconds, and the stalls differ by build because the option set does.
 
 25–35 calls and under $0.002 per level; 15–20 minutes of emulation per level.
 
