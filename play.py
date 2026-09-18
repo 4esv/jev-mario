@@ -90,9 +90,12 @@ RULES = (
 )
 GRID_LEGEND = (
     "Text grid, 13 rows x 20 columns, each cell one 16px tile. Row 7 is Mario's row. "
-    "M = Mario (column 5). # = solid ground, brick, block or pipe. E = enemy. . = empty air. "
+    "M = Mario (column 5). # = solid ground, brick, block or pipe. . = empty air. Letters are enemies: "
+    "G goomba, K koopa, S koopa shell, F flying koopa, P piranha plant, B buzzy beetle, H hammer brother. "
     "Mario walks right (toward higher columns). Falling into a column with no # below Mario is death. "
-    "Touching an E from the side is death; landing on it from above kills it."
+    "Touching an enemy from the side is death; landing on a goomba or koopa from above kills it. "
+    "A stomped koopa leaves a shell that kills on touch and slides when kicked. A piranha plant cannot be "
+    "stomped. A flying koopa bounces along the ground."
 )
 
 # Measured in this emulator: a full jump (A held until landing) at a given horizontal speed.
@@ -149,13 +152,14 @@ def features(g: str, v: int = 0, airborne: bool | None = None) -> dict:
     seen = []
     for dx in range(1, 16):
         for r in range(13):
-            if rows[r][4 + dx] == "E":
-                seen.append({"tiles": dx, "up": feet - r})
+            if rows[r][4 + dx] in ENEMY_LETTERS:
+                seen.append({"tiles": dx, "up": feet - r, "kind": ENEMY_NAME[rows[r][4 + dx]]})
     f["enemies"] = seen
     enemies = [e["tiles"] for e in seen if -1 <= e["up"] <= 1]
     f["enemies_ahead"] = enemies
     f["enemy_ahead"] = {"tiles": enemies[0]} if enemies else None
-    f["enemies_behind"] = [dx for dx in range(1, 5) if any(rows[r][4 - dx] == "E" for r in (feet - 1, feet, ground))]
+    f["enemies_behind"] = [dx for dx in range(1, 5)
+                           if any(rows[r][4 - dx] in ENEMY_LETTERS for r in (feet - 1, feet, ground))]
     behind = 0
     while behind < 4 and rows[feet][3 - behind] == "." and rows[ground][3 - behind] == "#":
         behind += 1
@@ -169,10 +173,10 @@ def features(g: str, v: int = 0, airborne: bool | None = None) -> dict:
     if seen:
         def where(en: dict) -> str:
             if en["up"] > 1:
-                return f"{en['tiles']} tiles ahead and {en['up']} tiles up (on top of something)"
+                return f"a {en['kind']} {en['tiles']} tiles ahead and {en['up']} tiles up (on top of something)"
             if en["up"] < -1:
-                return f"{en['tiles']} tiles ahead and {-en['up']} tiles below"
-            return f"{en['tiles']} tiles ahead at ground level"
+                return f"a {en['kind']} {en['tiles']} tiles ahead and {-en['up']} tiles below"
+            return f"a {en['kind']} {en['tiles']} tiles ahead at ground level"
         parts.append("Enemies: " + "; ".join(where(en) for en in seen[:4]) + ".")
     else:
         parts.append("No enemy ahead.")
@@ -224,6 +228,44 @@ def features(g: str, v: int = 0, airborne: bool | None = None) -> dict:
     return f
 
 
+# ----------------------------------------------------------------------------- scripted twin
+def policy(f: dict) -> str:
+    """RULES as a deterministic if-chain over the same fields Jev gets. The 'rules' bot; no API calls."""
+    v_full = f["speed"] == "running at full speed"
+    high, far = f["jump_reach_now"]["tiles_high"], f["jump_reach_now"]["tiles_far"]
+    w, gp = f["wall_ahead"], f["gap_ahead"]
+    ahead = f["enemies_ahead"]
+    landing_bad = bool(f["enemies_near_landing_spot"])
+    forward_jump = "run and jump right" if v_full else "jump right"
+    if ahead and ahead[0] <= 1:
+        return "jump in place" if f["speed"] == "standing still" else forward_jump
+    if f["enemies_behind"] and f["enemies_behind"][0] <= 2:
+        return "jump in place" if landing_bad else forward_jump
+    on_wall = [e for e in f["enemies"] if w and e["tiles"] in (w["tiles"], w["tiles"] + 1) and e["up"] >= 1]
+    if on_wall:
+        if JUMP_TABLE[0][1] >= w["height"] + 2:
+            if v_full and 3 <= w["tiles"] <= 5:
+                return "run and jump right"
+            return "run right" if w["tiles"] >= 6 else "back off for a run-up"
+        return "stand"
+    if w and w["tiles"] <= 8:
+        start = max(1, far // 2)
+        if high < w["height"]:
+            return "run right" if w["tiles"] >= 6 else "back off for a run-up"
+        if start - 1 <= w["tiles"] <= start + 1:
+            return "jump in place" if landing_bad else forward_jump
+        if w["tiles"] > start + 1:
+            return "run right"
+        return "jump right"
+    if gp and gp["tiles"] <= 8:
+        if far > gp["width"] + 1:
+            return forward_jump if gp["tiles"] <= 1 else "run right"
+        return "run right" if gp["tiles"] >= 6 else "back off for a run-up"
+    if ahead and 2 <= ahead[0] <= 3:
+        return "hop right" if landing_bad else forward_jump
+    return "run right"
+
+
 # ----------------------------------------------------------------------------- emulator and RAM
 def load_env() -> None:
     p = Path(__file__).resolve().parent / ".env"
@@ -251,23 +293,35 @@ def tile(ram, x: int, y: int) -> int:
     return int(ram[0x500 + page * 208 + sy * 16 + sx])
 
 
+# Enemy type byte 0x16+slot. Verified in-game: 6 goomba, 0 green koopa, 13 piranha plant, 14 paratroopa.
+# The rest follow the standard SMB RAM map and are UNVERIFIED here.
+ENEMY_LETTER = {0: "K", 1: "K", 2: "B", 3: "K", 4: "K", 5: "H", 6: "G", 13: "P", 14: "F", 15: "F", 16: "F", 9: "F"}
+ENEMY_NAME = {"G": "goomba", "K": "koopa", "P": "piranha plant", "F": "flying koopa", "B": "buzzy beetle",
+              "H": "hammer brother", "S": "koopa shell", "E": "enemy"}
+ENEMY_LETTERS = set(ENEMY_NAME)
+
+
 def grid(ram) -> tuple[str, int, int]:
-    """13 rows x 20 columns around Mario: 6 rows above, 4 columns behind, 15 ahead."""
+    """13 rows x 20 columns around Mario: 6 rows above, 4 columns behind, 15 ahead. Letters mark enemy types."""
     mx = int(ram[0x6D]) * 256 + int(ram[0x86])
     my = int(ram[0x03B8]) + 16
     enemies = []
     for i in range(5):
         if ram[0x0F + i]:
+            letter = ENEMY_LETTER.get(int(ram[0x16 + i]), "E")
+            if letter == "K" and int(ram[0x1E + i]) in (2, 3):  # UNVERIFIED: stomped koopa state
+                letter = "S"
             # +8 puts a ground enemy in Mario's row; verified against the first goomba.
-            enemies.append((int(ram[0x6E + i]) * 256 + int(ram[0x87 + i]), int(ram[0xCF + i]) + 8))
+            enemies.append((int(ram[0x6E + i]) * 256 + int(ram[0x87 + i]), int(ram[0xCF + i]) + 8, letter))
     rows = []
     for dy in range(-6, 7):
         row = []
         for dx in range(-4, 16):
             x, y = mx + dx * 16, my + dy * 16
             ch = "#" if tile(ram, x, y) else "."
-            if any(abs(ex - x) <= 8 and abs(ey - y) <= 8 for ex, ey in enemies):
-                ch = "E"
+            for ex, ey, letter in enemies:
+                if abs(ex - x) <= 8 and abs(ey - y) <= 8:
+                    ch = letter
             if dx == 0 and dy == 0:
                 ch = "M"
             row.append(ch)
@@ -332,7 +386,7 @@ def run(bot: str, level: str = "1-1", dump: bool = False) -> dict:
     frame, best, last_best, last_gain = 0, 0, 0, 0
     info = {"x_pos": 0, "flag_get": False}
     term = trunc = False
-    deciding = bot == "jev" or bot.startswith("replay:") or dump
+    deciding = bot in ("jev", "rules") or bot.startswith("replay:") or dump
     replay = Replay(bot) if bot.startswith("replay:") else None
     client = httpx.Client(timeout=30)
 
@@ -370,6 +424,9 @@ def run(bot: str, level: str = "1-1", dump: bool = False) -> dict:
                             "probs": {k: round(p, 2) for k, p in probs.items()}, "summary": state["summary"], "grid": g})
             elif replay:
                 name = replay.next()
+                log.append({"frame": frame, "x": int(info["x_pos"]), "choice": name, "summary": state["summary"], "grid": g})
+            elif bot == "rules":
+                name = policy({**feats, "summary": state["summary"]})
                 log.append({"frame": frame, "x": int(info["x_pos"]), "choice": name, "summary": state["summary"], "grid": g})
             elif bot == "alternate":
                 name = "run and jump right" if (frame // 12) % 2 == 0 else "run right"
@@ -442,7 +499,7 @@ def inspect(path: str, n: int) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--bot", default="jev", help="jev | alternate | <action name> | replay:<log.jsonl>[@n]:<action,...>")
+    ap.add_argument("--bot", default="jev", help="jev | rules | alternate | <action name> | replay:<log.jsonl>[@n]:<action,...>")
     ap.add_argument("--level", default="1-1", help="world-stage, e.g. 2-1")
     ap.add_argument("--dump", action="store_true", help="print the state Jev would see, no API calls")
     ap.add_argument("--inspect", metavar="LOG", help="print the last decisions of a run log and exit")
