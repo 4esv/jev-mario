@@ -24,12 +24,13 @@ from play import ACTIONS, HOP_FRAMES, JUMPS, RELEASE, RUNS, USD_PER_TOKEN, airbo
 
 HORIZON = 60  # frames each move is played, then held until landing
 SETTLE_FRAMES = 8  # extra frames after landing so a death on contact is flagged inside the outcome
-OPTIONS = ["run right", "run and jump right", "run then jump", "jump right", "hop right", "jump in place",
-           "walk right", "stand", "walk left", "bounce on the spring behind", "hop back onto the ledge behind"]
-FOLLOW_UPS = ["run right", "jump right", "run and jump right", "run then jump", "walk left"]  # 25 two-move paths
+OPTIONS = ["run right", "run and jump right", "run then jump", "short run then jump", "jump right", "hop right",
+           "jump in place", "stand", "walk left", "bounce on the spring behind", "hop back onto the ledge behind"]
+FOLLOW_UPS = ["run right", "jump right", "run and jump right", "run then jump", "short run then jump", "walk left"]  # 36 paths
 FOLLOW = {"stand": 0, "walk left": 6}  # what to hold after the action itself; default is run right
 COMPOSITE = {
-    "run then jump": [("run right", 24), ("run and jump right", 60)],  # build speed, then jump
+    "run then jump": [("run right", 24), ("run and jump right", 60)],  # build full speed, then jump: 9 tiles
+    "short run then jump": [("run right", 12), ("run and jump right", 60)],  # walking speed from a 2-tile ledge: 5 tiles
 }
 # Raw joypad sequences (SIMPLE_MOVEMENT index, frames) for frame-exact moves. Found by probe at the 2-1
 # tower: step back onto the springboard, jump, land on it, press A as it releases. One frame off and it fails.
