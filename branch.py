@@ -210,11 +210,12 @@ def escape(sim: Sim) -> list[str] | None:
     return best_seq if best and best > 0 else None
 
 
-def ask_jev(client: httpx.Client, outcomes: dict[str, dict], summary: str) -> tuple[str, dict, int, float]:
+def ask_jev(client: httpx.Client, outcomes: dict[str, dict], summary: str,
+            url: str = play.JEV_URL, model: str = "jev-latest") -> tuple[str, dict, int, float]:
     criteria = {k: describe(o) for k, o in outcomes.items()}
     body = {
         "state": {"situation": summary, "outcomes": criteria},
-        "model": "jev-latest",
+        "model": model,
         "questions": {"action": {
             "type": "choice",
             "instructions": "You control Mario. Each option below says what actually happens if Mario does it for "
@@ -224,16 +225,18 @@ def ask_jev(client: httpx.Client, outcomes: dict[str, dict], summary: str) -> tu
             "criteria": criteria,
         }},
     }
+    key = play.os.environ.get("TYPESAFE_API_KEY")
+    headers = {"Authorization": f"Bearer {key}"} if key and url == play.JEV_URL else {}
     t0 = time.perf_counter()
-    r = client.post(play.JEV_URL, headers={"Authorization": f"Bearer {play.os.environ['TYPESAFE_API_KEY']}"}, json=body)
+    r = client.post(url, headers=headers, json=body)
     lat = time.perf_counter() - t0
     r.raise_for_status()
     d = r.json()
     a = d["answers"]["action"]
-    return a["choice"], a["probabilities"], d["usage"]["input_tokens"], lat
+    return a["choice"], a["probabilities"], d.get("usage", {}).get("input_tokens", 0), lat
 
 
-def run(bot: str, level: str) -> dict:
+def run(bot: str, level: str, url: str = play.JEV_URL, model: str = "jev-latest", label: str = None) -> dict:
     play.warnings.simplefilter("ignore")
     sim = Sim(level)
     frames, log, lats, tokens = [sim.obs.copy()], [], [], 0
@@ -261,7 +264,7 @@ def run(bot: str, level: str) -> dict:
                     last_best, last_gain = best, frame
                 continue
         if bot == "jev":
-            name, probs, tok, lat = ask_jev(client, outcomes, summary)
+            name, probs, tok, lat = ask_jev(client, outcomes, summary, url, model)
             tokens += tok
             lats.append(lat)
         else:
@@ -284,9 +287,11 @@ def run(bot: str, level: str) -> dict:
     sim.env.close()
     RUNS.mkdir(exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    tag = f"{level}-branch-{bot}"
-    result = {"level": level, "bot": f"branch-{bot}", "stamp": stamp, "best_x": best, "flag": bool(sim.info["flag_get"]),
-              "frames": frame, "api_calls": len(lats), "input_tokens": tokens, "cost_usd": round(tokens * USD_PER_TOKEN, 5),
+    name = label or bot
+    tag = f"{level}-branch-{name}"
+    cost = tokens * USD_PER_TOKEN if url == play.JEV_URL else 0.0  # self-hosted servers are free to run
+    result = {"level": level, "bot": f"branch-{name}", "stamp": stamp, "best_x": best, "flag": bool(sim.info["flag_get"]),
+              "frames": frame, "api_calls": len(lats), "input_tokens": tokens, "cost_usd": round(cost, 5),
               "latency_p50": round(sorted(lats)[len(lats) // 2], 3) if lats else None, "gif": f"{tag}-{stamp}.gif"}
     play.imageio.mimsave(RUNS / result["gif"], frames[::2], duration=1 / 30, loop=0)
     with (RUNS / "results.jsonl").open("a") as fh:
@@ -295,12 +300,12 @@ def run(bot: str, level: str) -> dict:
     return result
 
 
-def session(bot: str, levels: list[str], attempts: int) -> list[dict]:
+def session(bot: str, levels: list[str], attempts: int, **kw) -> list[dict]:
     """Play levels in order in one process. A level is retried up to `attempts` times; every attempt is logged."""
     results = []
     for level in levels:
         for i in range(1, attempts + 1):
-            r = run(bot, level)
+            r = run(bot, level, **kw)
             r["attempt"] = i
             results.append(r)
             print(json.dumps(r), flush=True)
@@ -317,9 +322,13 @@ if __name__ == "__main__":
     ap.add_argument("--level", default="1-1")
     ap.add_argument("--levels", help="comma-separated levels to play in order in one session, e.g. 1-1,2-1,3-1")
     ap.add_argument("--attempts", type=int, default=3, help="attempts per level in a session")
+    ap.add_argument("--url", default=play.JEV_URL, help="any server speaking the System One contract")
+    ap.add_argument("--model", default="jev-latest", help="model id sent in the request body")
+    ap.add_argument("--label", help="name for the run in results.jsonl and the gif; defaults to --bot")
     a = ap.parse_args()
     play.load_env()
+    kw = {"url": a.url, "model": a.model, "label": a.label}
     if a.levels:
-        session(a.bot, a.levels.split(","), a.attempts)
+        session(a.bot, a.levels.split(","), a.attempts, **kw)
     else:
-        print(json.dumps(run(a.bot, a.level)))
+        print(json.dumps(run(a.bot, a.level, **kw)))
