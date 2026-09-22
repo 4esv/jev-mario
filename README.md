@@ -22,7 +22,15 @@
 
 Jev takes 25–35 calls and under $0.002 per level, with 15–20 minutes of emulation per level.
 
-Any server speaking the same contract can be substituted with `--url`. [Kev-0.8B](https://huggingface.co/jaredpalmer/kev-0.8b), an open model trained on the System One format, reached 1672 on 1-1 in 15 calls. Its chosen option carried an average probability of 0.20 against a uniform 0.09 over the 11 options, where Jev's averaged 0.62. It ranks the simulated outcomes barely better than chance, and the run ended after it chose a backward move at x = 1440.
+Any server speaking the same contract can be substituted with `--url`. Two open models trained on the System One format were run on 1-1 through the same harness. `p` is the mean probability on the option taken, against 0.09 for a uniform choice over the 11 options.
+
+| model | 1-1 | calls | median latency | p |
+|---|---|---|---|---|
+| Jev | flag | 23 | 0.38 s | 0.62 |
+| [Kev-0.8B](https://huggingface.co/jaredpalmer/kev-0.8b) | 1672 | 15 | 2.89 s | 0.20 |
+| [Laya](https://huggingface.co/convaiinnovations/laya) | 1139 | 10 | 0.75 s | 0.54 |
+
+The harness simulates every option and passes the measured outcome, so the only task left is ranking eleven descriptions. Kev ranks them slightly better than chance and drifts right until it takes a backward move at x = 1440. Laya is confident and wrong: it opened with `stand`, then `walk left` at 0.93, then `jump in place` three times. Its checkpoint sets a temperature of 0.10 for choices of 11 or more options against 1.0 to 2.0 for smaller ones, so its probabilities are sharp here regardless of the pick.
 
 **Direct control** (`play.py`). One action every 6 frames from a text summary; the emulator pauses during the call. `--bot rules` is the same rules as an if-chain.
 
@@ -49,7 +57,7 @@ cp .env.example .env        # TYPESAFE_API_KEY
 uv sync
 uv run python branch.py --bot jev --level 1-1
 uv run python branch.py --bot jev --levels 1-1,2-1,3-1 --attempts 2
-uv run python branch.py --bot jev --level 1-1 --url http://127.0.0.1:8009/v1/systemone --model kev-latest --label kev
+uv run python branch.py --bot jev --level 1-1 --url http://127.0.0.1:8010/v1/systemone --label laya
 uv run python play.py --bot jev --level 1-1
 uv run python live.py --bot jev --level 1-1
 ```
@@ -63,5 +71,6 @@ Each run writes `runs/<level>-<mode>-<bot>-<stamp>.gif`, a per-decision log besi
 - Snapshot/restore is nes-py's `_backup`/`_restore`; it has one slot, so continuations are replayed from the root. Restore was verified exact over 240 frames.
 - RAM: x = `0x6D:0x86`, y = `0x3B8`, horizontal speed = `0x57`, airborne = `0x1D`, screen x = `0x3AD`, tiles at `0x500` (two 16×13 pages), enemy slots `0x0F`–`0x13` with type at `0x16+i`. Verified types: 6 goomba, 0 green koopa, 13 piranha plant, 14 flying koopa.
 - Frame-exact moves (`RAW` in `branch.py`) were found by probe and fail if shifted by one frame.
-- `branch.py --url` sends the request elsewhere. The bearer token and the cost figure apply to the TypeSafe endpoint only, and `usage.input_tokens` is optional in the response.
+- `branch.py --url` sends the request elsewhere. The bearer token and the cost figure apply to the TypeSafe endpoint only, and `usage.input_tokens` is optional in the response. The Laya and Kev servers used above are `evaljev.serve` in [jev-eval](https://github.com/4esv/jev-eval) and `kev.serve` in the Kev repo.
+- Wall time per decision is dominated by the emulator, which plays 11 options and 36 continuations from a snapshot. Model latency changes the total by minutes, not by an order of magnitude.
 - Emulator: `gym-super-mario-bros` with `nes-py`, pinned to `numpy<2` and `gym==0.26`.

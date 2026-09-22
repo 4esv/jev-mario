@@ -47,3 +47,4 @@
 {"level": "2-1", "bot": "branch-jev", "stamp": "20260918-174206", "best_x": 2066, "flag": false, "frames": 2361, "api_calls": 27, "input_tokens": 49415, "cost_usd": 0.00208, "latency_p50": 0.424, "gif": "2-1-branch-jev-20260918-174206.gif"}
 {"level": "2-1", "bot": "branch-jev", "stamp": "20260918-181941", "best_x": 2066, "flag": false, "frames": 2361, "api_calls": 27, "input_tokens": 49415, "cost_usd": 0.00208, "latency_p50": 0.394, "gif": "2-1-branch-jev-20260918-181941.gif"}
 {"level": "1-1", "bot": "branch-kev", "stamp": "20260922-113914", "best_x": 1672, "flag": false, "frames": 1232, "api_calls": 15, "input_tokens": 19468, "cost_usd": 0.0, "latency_p50": 2.889, "gif": "1-1-branch-kev-20260922-113914.gif"}
+{"level": "1-1", "bot": "branch-laya", "stamp": "20260922-134655", "best_x": 1139, "flag": false, "frames": 1153, "api_calls": 10, "input_tokens": 10051, "cost_usd": 0.0, "latency_p50": 0.749, "gif": "1-1-branch-laya-20260922-134655.gif"}
